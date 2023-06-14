@@ -21,7 +21,6 @@ def extractSmuggledBits(bDataB, bDataC):
     bitS1 = ((rawDataB & (1 << 15)) >> 15).astype('bool')
     bitS2 = ((rawDataC & (1 << 14)) >> 14).astype('bool')
     bitS3 = ((rawDataC & (1 << 15)) >> 15).astype('bool')
-
     bitsS = np.c_[bitS0, bitS1, bitS2, bitS3].T
 
     dataB = sign_extend(rawDataB & 0x3FFF, 14)
@@ -47,11 +46,10 @@ print(f'[RP] RedPitaya running FW version \'{currentFWName:s}\'')
 oscWrapper.setChannelsCapture(getA=True, getB=True)
 
 frameTime = 0.1    # Acquisition time in seconds
-lineTime  = 25e-6  # For camera. Not used
-intTime   = 21e-6  # For camera. Not used
+lineTime = 25e-6  # For camera. Not used
+intTime = 21e-6  # For camera. Not used
 
-
-### Configure Generator
+### Configure Generator, decimation
 step0 = 1/8.0
 step1 = 1/8.0
 
@@ -86,8 +84,6 @@ oscWrapper.pidSetParams(rawP=0, rawI=0, rawD=0, ch='22')
 # And reset all integrators
 oscWrapper.pidResetIntegrator(int11=True,int12=True,int21=True,int22=True)
 
-
-
 ### Start ADCs Acquisition
 oscWrapper.startContinuousACQ(startTriggers=False)
 oscWrapper.setOutputFrameTrigger(count=None)
@@ -96,7 +92,6 @@ print('[RP] Starting to send output frame triggers!!')
 ### Get Data
 bDataB, bDataC, repLen, triggerTS, triggerIndex, wrapped = oscWrapper.getData(timeout=2.0)
 dataB, dataC, smuggledBits = extractSmuggledBits(bDataB, bDataC)
-
 
 ### Stop ADCs Acquisition
 oscWrapper.stopACQ()
