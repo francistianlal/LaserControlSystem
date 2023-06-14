@@ -1,7 +1,7 @@
+# pyro 4 enables you to build applications in which objects can talk to each other over the network, with minimal programming effort
 import Pyro4
 import time
 import pickle
-
 import numpy as np
 import pylab as py
 
