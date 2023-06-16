@@ -94,20 +94,14 @@ amp_max = 1
 
 nBits = 14
 maxVal = 2**(nBits-1) - 1
-
 NSamples = int(frameTime / (rpClockT/ step0))
-
 tAxis = np.arange(NSamples) * (rpClockT/ step0)
-
+DAC_scale = maxVal / amp_max
 # waveform selection
 # sin
-f_sin = 1000e3
-amplitude = 0.1
-genWave0 = maxVal * np.sin(2 * np.pi * f_sin * tAxis) * (amplitude / amp_max)
-
-# DC
-amplitude = 0
-genWave0 = maxVal * np.ones(len(tAxis)) * (amplitude / amp_max)
+f_sin = 1000e3 # Hz
+amplitude = 0.1 # V
+genWave0 = amplitude * np.sin(2 * np.pi * f_sin * tAxis) * DAC_scale
 
 # triangular
 duration = frameTime  # Duration of the waveform in seconds
@@ -116,38 +110,25 @@ frequency = 10e3 # Frequency of the triangular waveform in Hz
 amplitude = 0.1  # Amplitude of the triangular waveform
 # Generate the triangular waveform
 t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
-genWave0 = maxVal * triangular_waveform
+genWave1 = triangular_waveform * DAC_scale
+
+# DC
+amplitude = 0.05
+genWave2 = amplitude * np.ones(len(tAxis)) * DAC_scale
 
 #plt.figure(1)
 #plt.plot(genWave0)
+output1 = genWave1
+output2 = genWave2
 
-oscWrapper.updateGeneratorWaveform(rWaveA=genWave0, stepA=step0, rWaveB=genWave0, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
+### start DAC waveform generation
+oscWrapper.updateGeneratorWaveform(rWaveA = output1, stepA=step0, rWaveB = output2, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
 oscWrapper.setSignals(fLine=1 / lineTime, laserStatus=False, fanStatus=forceFan, TCamPulse=intTime, TSyncPulse=intTime)
 
 ### Configure ADCs
-kClockDecimate = 8
+kClockDecimate = 4
 oscWrapper.setDecimate(kClockDecimate)
 oscWrapper.setNSamples(int(frameTime / 8e-9 / kClockDecimate))
-
-### Configure PID Settings
-# Channel 11
-oscWrapper.pidSetSetpoint(rawValue=0, ch='11')
-oscWrapper.pidSetParams(rawP=0, rawI=0, rawD=0, ch='11')
-
-# Channel 12
-oscWrapper.pidSetSetpoint(rawValue=0, ch='12')
-oscWrapper.pidSetParams(rawP=0, rawI=0, rawD=0, ch='12')
-
-# Channel 21
-oscWrapper.pidSetSetpoint(rawValue=0, ch='21')
-oscWrapper.pidSetParams(rawP=0, rawI=0, rawD=0, ch='21')
-
-# Channel 22
-oscWrapper.pidSetSetpoint(rawValue=0, ch='22')
-oscWrapper.pidSetParams(rawP=0, rawI=0, rawD=0, ch='22')
-
-# And reset all integrators
-oscWrapper.pidResetIntegrator(int11=True,int12=True,int21=True,int22=True)
 
 ### Start ADCs Acquisition
 oscWrapper.startContinuousACQ(startTriggers=False)
@@ -158,11 +139,126 @@ print('[RP] Starting to send output frame triggers!!')
 bDataB, bDataC, repLen, triggerTS, triggerIndex, wrapped = oscWrapper.getData(timeout=2.0)
 dataB, dataC, smuggledBits = extractSmuggledBits(bDataB, bDataC)
 
-ADCBits  = 14
+ADCBits = 14
 ADCRange = 20.0
-
 ADCScale = ADCRange / 2**(ADCBits-1)
 
+input1 = dataB * ADCScale # Control loop
+input2 = dataC * ADCScale # Linewidth measurement
+
+#### here set the ADC/DAC to run continuously for 60 second
+N_loop = int(60 / frameTime)
+loop_1_switch = True
+loop_2_switch = False
+loop_3_switch = False
+for i in range(N_loop):
+    print('round ' + str(i))
+
+    ## control loop 1, MZI biasing control
+    if loop_1_switch:
+        # parameter setting
+        # Loop filter (PID controller)
+        Kp = 0.1  # Proportional gain
+        Ki = 0.01  # Integral gain
+        Kd = 0.001  # Derivative gain
+        pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
+        # Setpoint and initial feedback value
+        setpoint = 0.0 # V
+        # Simulation time parameters
+        dt = frameTime  # Time step
+        # Calculate the control signal
+        # the feedback signal is the average of min and max of the waveform
+        feedback = np.mean([max(input1), min(input1)])
+        control_signal = pid.calculate(setpoint, feedback, dt)
+        print('here is the first control loop, error signal = ' + str(feedback) + ', control_signal = ' + str(control_signal))
+        # apply the control signal to the output
+        # DC
+        amplitude = amplitude + control_signal
+        genWave2 = amplitude * np.ones(len(tAxis)) * DAC_scale
+
+    ## control loop 2, OPLL
+    if loop_2_switch:
+        # parameter_setting
+        f_ref = 1e5
+        previous_phase = 0
+        last_phase_error = 0
+
+        duration = frameTime  # Duration of the signal in seconds
+        sample_rate = 1 / 8e-9 / kClockDecimate  # Number of samples per second
+        # gain of PID controller
+        Kp = 0.1  # Proportional gain
+        Ki = 0.01  # Integral gain
+        Kd = 0.001  # Derivative gain
+
+        cutoff_frequency = 100e3  # Cutoff frequency for the low-pass filter in Hz
+
+        K_LVCO = 1e6  # Hz/V
+        K_pitaya = 20  # 20mA/V
+        K_laser = 200e6  # Hz/mA
+        K_VCO = K_LVCO / K_pitaya / K_laser  # VCO gain Hz/V
+
+        amplitude = 0.05  # need to figure out how much voltage is needed
+
+        adc_input = input1
+        t = tAxis
+        # create the local oscillator signal
+        # Generate the LO signal (cosine) with no phase offset
+        lo_signal_cos = np.cos(2 * np.pi * f_ref * t)
+        # Generate the LO signal (sine) with a 90-degree phase shift
+        lo_signal_sin = np.sin(2 * np.pi * f_ref * t)
+
+        # Demodulate the ADC input signal using the LO signals
+        I_component = adc_input * lo_signal_cos
+        Q_component = adc_input * lo_signal_sin
+
+        # Apply a low-pass filter to the I and Q components
+        b, a = signal.butter(4, 2 * cutoff_frequency / sample_rate, 'low')
+        I_filtered = signal.lfilter(b, a, I_component)
+        Q_filtered = signal.lfilter(b, a, Q_component)
+
+        # Extract the phase using arctan
+        phase = -np.arctan(Q_filtered / I_filtered)
+
+        # Apply modulo operation to handle phase wrapping
+        # phase alway have to be zero
+        phase_wrapped = np.mod(phase + np.pi, 2 * np.pi) - np.pi
+        current_phase = phase_wrapped[-1]
+
+        # calculate the phase difference and if no previous phase, skip
+        if previous_phase in globals():
+            phase_change = current_phase - previous_phase
+            # update the phase
+            previous_phase = current_phase
+        else:
+            phase_change = 0
+            previous_phase = current_phase
+
+        # Loop filter (PID controller)
+        pid = PIDController(kp=Kp, ki=Ki, kd=Kd)
+        # Setpoint and initial feedback value
+        setpoint = 0.0
+        # Simulation time parameters
+        dt = frameTime  # Time step
+        # Calculate the control signal
+        control_signal = pid.calculate(setpoint, phase_change, dt)
+        # Apply control signal to triangular wave VCO
+        # triangular
+        frequency = control_signal * K_VCO  # Frequency of the triangular waveform in Hz
+        # Generate the triangular waveform
+        t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
+        genWave1 = triangular_waveform * DAC_scale
+
+    #### ADC/DAC data feeding for next round of control signal generation
+    output1 = genWave1
+    output2 = genWave2
+    ### DAC waveform generation and ADC waveform extraction
+    oscWrapper.updateGeneratorWaveform(rWaveA = output1, stepA=step0, rWaveB = output2, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
+    oscWrapper.setSignals(fLine=1 / lineTime, laserStatus=False, fanStatus=forceFan, TCamPulse=intTime, TSyncPulse=intTime)
+    oscWrapper.startContinuousACQ(startTriggers=False)
+    bDataB, bDataC, repLen, triggerTS, triggerIndex, wrapped = oscWrapper.getData(timeout=2.0)
+    dataB, dataC, smuggledBits = extractSmuggledBits(bDataB, bDataC)
+    input1 = dataB * ADCScale # Control loop
+    input2 = dataC * ADCScale # Linewidth measurement
+
 ### Stop ADCs Acquisition
-oscWrapper.stopACQ()
 oscWrapper.stopACQ()
