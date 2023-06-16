@@ -1,3 +1,4 @@
+
 # pyro 4 enables you to build applications in which objects can talk to each other over the network, with minimal programming effort
 import Pyro4
 import time
@@ -5,6 +6,44 @@ import pickle
 import numpy as np
 import pylab as py
 import matplotlib.pyplot as plt
+from scipy import signal
+
+def generate_triangular_waveform(duration, sampling_freq, frequency, amplitude):
+    # Generate time axis
+    t = np.linspace(0, duration, int(duration * sampling_freq), endpoint=False)
+
+    # Generate triangular waveform
+    triangular_waveform = amplitude * signal.sawtooth(2 * np.pi * frequency * t, width=0.5)
+
+    return t, triangular_waveform
+
+# a PIDController model
+class PIDController:
+    def __init__(self, kp, ki, kd):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.error_sum = 0
+        self.prev_error = 0
+
+    def calculate(self, setpoint, feedback, dt):
+        error = setpoint - feedback
+
+        # Proportional term
+        p_term = self.kp * error
+
+        # Integral term
+        self.error_sum += error * dt
+        i_term = self.ki * self.error_sum
+
+        # Derivative term
+        d_term = self.kd * (error - self.prev_error) / dt
+        self.prev_error = error
+
+        # Total control signal
+        control_signal = p_term + i_term + d_term
+
+        return control_signal
 
 def extractSmuggledBits(bDataB, bDataC):
     def sign_extend(value, bits):
@@ -28,7 +67,7 @@ def extractSmuggledBits(bDataB, bDataC):
 Pyro4.config.SERIALIZER = "pickle"
 Pyro4.config.PICKLE_PROTOCOL_VERSION = 4
 
-uri = 'PYRO:RedPitaya.Wrapper@169.254.239.95:8082'
+uri = 'PYRO:RedPitaya.Wrapper@rp-f0a610.local:8082'
 
 forceFan = False
 
@@ -42,40 +81,51 @@ print(f'[RP] RedPitaya running FW version \'{currentFWName:s}\'')
 
 oscWrapper.setChannelsCapture(getA=True, getB=True)
 
-frameTime = 0.1    # Acquisition time in seconds
+frameTime = 0.1e-3    # Acquisition time in seconds
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
 
 rpClockT = 8e-9
 
 ### Configure Generator, decimation
-step0 = 1/8.0
-step1 = 1/8.0
+step0 = 1/4.0
+step1 = 1/4.0
+amp_max = 1
 
-nBits = 16
+nBits = 14
 maxVal = 2**(nBits-1) - 1
 
-frameTime = 10e-6
 NSamples = int(frameTime / (rpClockT/ step0))
 
 tAxis = np.arange(NSamples) * (rpClockT/ step0)
 
-DC = 0.1 * maxVal
+# waveform selection
+# sin
+f_sin = 1000e3
+amplitude = 0.1
+genWave0 = maxVal * np.sin(2 * np.pi * f_sin * tAxis) * (amplitude / amp_max)
 
-genWave0 = +0.5 * maxVal * np.cos(2*np.pi*1000e3*tAxis) + DC
-genWave1 = -0.5 * maxVal * np.cos(2*np.pi*1000e3*tAxis) - DC
+# DC
+amplitude = 0
+genWave0 = maxVal * np.ones(len(tAxis)) * (amplitude / amp_max)
 
-#genWave0 = np.arange(16384, dtype='int16')
-#genWave1 = -1*np.arange(16384, dtype='int16')
+# triangular
+duration = frameTime  # Duration of the waveform in seconds
+sampling_freq = step0/rpClockT  # Sampling frequency in Hz
+frequency = 10e3 # Frequency of the triangular waveform in Hz
+amplitude = 0.1  # Amplitude of the triangular waveform
+# Generate the triangular waveform
+t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
+genWave0 = maxVal * triangular_waveform
 
-plt.figure(1)
-plt.plot(genWave0)
+#plt.figure(1)
+#plt.plot(genWave0)
 
-oscWrapper.updateGeneratorWaveform(rWaveA=genWave0, stepA=step0, rWaveB=genWave1, stepB=step1, syncChannels=True, VERBOSE=False, nbits=16)
+oscWrapper.updateGeneratorWaveform(rWaveA=genWave0, stepA=step0, rWaveB=genWave0, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
 oscWrapper.setSignals(fLine=1 / lineTime, laserStatus=False, fanStatus=forceFan, TCamPulse=intTime, TSyncPulse=intTime)
 
 ### Configure ADCs
-kClockDecimate = 32
+kClockDecimate = 8
 oscWrapper.setDecimate(kClockDecimate)
 oscWrapper.setNSamples(int(frameTime / 8e-9 / kClockDecimate))
 
@@ -114,4 +164,5 @@ ADCRange = 20.0
 ADCScale = ADCRange / 2**(ADCBits-1)
 
 ### Stop ADCs Acquisition
+oscWrapper.stopACQ()
 oscWrapper.stopACQ()
