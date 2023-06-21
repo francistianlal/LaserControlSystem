@@ -148,7 +148,6 @@ reference_waveform = []
 frameTime = 0.1e-3    # Acquisition time in seconds
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
-
 rpClockT = 8e-9
 
 ### Configure Generator, decimation
@@ -316,14 +315,24 @@ for i in range(N_loop):
     # control loop 3 Active frequency linearization
     if loop_3_switch:
         # calculate the error signal, the waveform here is the beat signal from MZI
+        time_tbd = tAxis
+        waveform_tbd = input1
+        reverse = False
+        ### this can be commented after parameter is extracted
+        N_sample_visual = 1000
+        plt.plot(time_tbd[1:N_sample_visual], waveform_tbd[1:N_sample_visual])
+        ###
+        para = [] # amplitude, period, phase, amplitude_bias
+        current_waveform = waveform_transformer(waveform_tbd, time_tbd, reverse=False, para=None)
+
         if previous_waveform in globals():
             # normalize the waveform
-            current_waveform = waveform_normalizer(input1, reference_waveform)
+            reference_waveform
+
             waveform_error = current_waveform - previous_waveform
             # update the waveform
             previous_waveform = current_waveform
         else:
-            current_waveform = waveform_normalizer(input1, reference_waveform)
             waveform_error = 0
             previous_waveform = current_waveform
 
