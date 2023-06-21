@@ -1,5 +1,20 @@
 
-# pyro 4 enables you to build applications in which objects can talk to each other over the network, with minimal programming effort
+# -*- coding: utf-8 -*-
+"""
+Created on Tue 06/15/2023 12:06:02 2023
+use for writing the hardware for laser control system
+pyro 4 enables you to build applications in which objects can talk to each other over the network, with minimal programming effort
+
+function used:
+1. triangular waveform generator
+2. triangular waveform function
+3. triangular waveform normalizer for noisy signal
+4. triangular waveform tranformer for normalize and un-normalize the noisy signal
+4. bit controller
+
+@author: Francis Tian
+"""
+
 import Pyro4
 import time
 import pickle
@@ -16,6 +31,49 @@ def generate_triangular_waveform(duration, sampling_freq, frequency, amplitude):
     triangular_waveform = amplitude * signal.sawtooth(2 * np.pi * frequency * t, width=0.5)
 
     return t, triangular_waveform
+
+# used to transform the waveform so that the reference and waveform_tbc have the same scale
+# the reference_waveform is a normalized MZI beat signal in time domain, obtained by sweeping a perfectly linearly
+# FM laser signal across the MZI we used for FM linearity locking, both frequency and amplitude = 1, centered around 0
+# Define the triangular wave function
+def triangular_wave(t, amplitude, period, center, amplitude_bias):
+    return amplitude * (2 / period) * (period / 2 - np.abs((t - center) % period - period / 2)) - amplitude / 2 + amplitude_bias
+
+# use curve fitting principle to guess the paramter for this triangular wave
+# then perform the regulation
+def regulate_triangular_wave(time, waveform, initial_guess=[1, 1, 1, 1]):
+    # Fit the noisy signal with the triangular wave function
+    params, params_covariance = curve_fit(triangular_wave, time, waveform, p0=initial_guess)
+
+    # Extract the fitted parameters
+    amplitude_fit, period_fit, phase_fit, amplitude_bias_fit = params
+    amplitude_fit = abs(amplitude_fit)
+    # # Generate the fitted triangular wave signal
+    # fitted_signal = triangular_wave(time, amplitude_fit, period_fit, phase_fit, amplitude_bias_fit)
+    # plt.plot(time, fitted_signal)
+
+    # signal regulation
+    regulated_waveform = (waveform - amplitude_bias_fit) / (amplitude_fit * 0.5)
+    regulated_time = time / period_fit
+    return regulated_time, regulated_waveform, params
+
+def waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = None):
+    # when we are transforming the waveform back to the normal scale for ADC
+    # we have to know the para used in normalization and curve fitting
+    try:
+        amplitude_fit, period_fit, phase_fit, amplitude_bias_fit = para
+    except:
+        raise KeyError("we have to know the para used in normalization for the program to work")
+
+    if reverse:
+        waveform_original = waveform_tbd * (amplitude_fit * 0.5) + amplitude_bias_fit
+        time_original = time_tbd * period_fit
+        # return the waveform to be used by ADC/DAC
+        return waveform_original, time_original
+    else:
+        regulated_time, regulated_waveform, params = regulate_triangular_wave(time_tbd, waveform_tbd, para)
+        # return the normalized waveform
+        return regulated_waveform, regulated_time, params
 
 # a PIDController model
 class PIDController:
@@ -81,6 +139,12 @@ print(f'[RP] RedPitaya running FW version \'{currentFWName:s}\'')
 
 oscWrapper.setChannelsCapture(getA=True, getB=True)
 
+######
+# give the reference waveform, this should be imported from a file in the future !!!!!!!!!!!!!
+######
+reference_waveform = []
+
+# set the ADC/DAC general code
 frameTime = 0.1e-3    # Acquisition time in seconds
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
@@ -151,6 +215,7 @@ N_loop = int(60 / frameTime)
 loop_1_switch = True
 loop_2_switch = False
 loop_3_switch = False
+
 for i in range(N_loop):
     print('round ' + str(i))
 
@@ -247,6 +312,35 @@ for i in range(N_loop):
         # Generate the triangular waveform
         t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
         genWave1 = triangular_waveform * DAC_scale
+
+    # control loop 3 Active frequency linearization
+    if loop_3_switch:
+        # calculate the error signal, the waveform here is the beat signal from MZI
+        if previous_waveform in globals():
+            # normalize the waveform
+            current_waveform = waveform_normalizer(input1, reference_waveform)
+            waveform_error = current_waveform - previous_waveform
+            # update the waveform
+            previous_waveform = current_waveform
+        else:
+            current_waveform = waveform_normalizer(input1, reference_waveform)
+            waveform_error = 0
+            previous_waveform = current_waveform
+
+        # parameter setting for PID
+        # Loop filter (PID controller)
+        Kp = 0.1  # Proportional gain
+        Ki = 0.01  # Integral gain
+        Kd = 0.001  # Derivative gain
+        pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
+        # Setpoint and initial feedback value
+        setpoint = 0.0  # V
+        # Simulation time parameters
+        dt = frameTime  # Time step
+        # Calculate the control signal
+        # the feedback signal is the average of min and max of the waveform
+        feedback = np.mean([max(input1), min(input1)])
+        control_signal = pid.calculate(setpoint, feedback, dt)
 
     #### ADC/DAC data feeding for next round of control signal generation
     output1 = genWave1
