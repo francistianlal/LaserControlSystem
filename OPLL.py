@@ -75,6 +75,47 @@ def waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = None):
         # return the normalized waveform
         return regulated_waveform, regulated_time, params
 
+# waveform error calculator, both waveform must be regulated
+def error_calculator(current_waveform, regulated_time, reference_waveform):
+    # Extend and mirror the ramp signal to match the length and shape of the triangular wave signal
+    num_points = len(reference_waveform) * 2
+    t_reference = np.linspace(0, 1, num_points + 1)[:-1]
+    extended_ramp_signal = np.concatenate((reference_waveform, np.flip(reference_waveform)))
+
+    # Repeat and trim the extended ramp signal to match the length of the triangular wave signal
+    repitition_number = max(regulated_time) + 1
+    extended_ramp_signal_matched = np.tile(extended_ramp_signal, int(repitition_number))
+
+    # find the first minima of the triangular wave signal in the time domain
+    min_index = None
+    for i in range(1, len(current_waveform) - 1):
+        if current_waveform[i] < current_waveform[i - 1] and current_waveform[i] < current_waveform[i + 1]:
+            min_index = i
+            min_time = regulated_time[i]
+            break
+
+    start_point = 0
+    num_steps = np.mean(np.diff(t_reference))
+    num_samples = len(extended_ramp_signal_matched)
+    end = start_point + (num_steps * num_samples)
+    extended_reference_time = np.linspace(start_point, end, num_samples)
+
+    shift_time = 1 - min_time
+    extended_reference_time = extended_reference_time - shift_time
+
+    # now we calculate the error by calculating the difference between reference and current waveform
+    waveform_error_storage = []
+    for index, value in enumerate(current_waveform):
+        time = regulated_time[index]
+        # find the corresponding value in the extended ramp
+        i_t_ref = np.abs(extended_reference_time - time).argmin()
+        # calculate the error
+        waveform_error_unit = value - extended_ramp_signal_matched[i_t_ref]
+        waveform_error_storage.append(waveform_error_unit)
+    # waveform error is an array with the same length as the current waveform, which will be fed to the output DAC
+    return waveform_error_storage
+
+
 # a PIDController model
 class PIDController:
     def __init__(self, kp, ki, kd):
@@ -140,7 +181,8 @@ print(f'[RP] RedPitaya running FW version \'{currentFWName:s}\'')
 oscWrapper.setChannelsCapture(getA=True, getB=True)
 
 ######
-# give the reference waveform, this should be imported from a file in the future !!!!!!!!!!!!!
+# give the reference waveform, should be rising ramp with a length of 0.5 sec
+# , this should be imported from a file in the future !!!!!!!!!!!!!
 ######
 reference_waveform = []
 
@@ -323,17 +365,18 @@ for i in range(N_loop):
         plt.plot(time_tbd[1:N_sample_visual], waveform_tbd[1:N_sample_visual])
         ###
         para = [] # amplitude, period, phase, amplitude_bias
-        current_waveform = waveform_transformer(waveform_tbd, time_tbd, reverse=False, para=None)
+        # regulate the waveform from ADC
+        current_waveform, regulated_time, para = waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = para)
 
         if previous_waveform in globals():
-            # normalize the waveform
-            reference_waveform
-
-            waveform_error = current_waveform - previous_waveform
+            # calculate the waveform error for updating the output AC
+            waveform_error = error_calculator(current_waveform, regulated_time, reference_waveform)
+            # the waveform error will be reverse back to original
+            waveform_error_original, time_original = waveform_transformer(waveform_error, regulated_time, reverse=True, para=para)
             # update the waveform
             previous_waveform = current_waveform
         else:
-            waveform_error = 0
+            waveform_error_original = 0
             previous_waveform = current_waveform
 
         # parameter setting for PID
@@ -343,13 +386,16 @@ for i in range(N_loop):
         Kd = 0.001  # Derivative gain
         pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
         # Setpoint and initial feedback value
-        setpoint = 0.0  # V
+        setpoints = np.zeros(int(len(waveform_error_original)))  # V
         # Simulation time parameters
         dt = frameTime  # Time step
         # Calculate the control signal
         # the feedback signal is the average of min and max of the waveform
-        feedback = np.mean([max(input1), min(input1)])
-        control_signal = pid.calculate(setpoint, feedback, dt)
+        feedbacks = waveform_error_original
+        control_signal = pid.calculate(setpoints, feedbacks, dt)
+
+        # generates the output signal
+
 
     #### ADC/DAC data feeding for next round of control signal generation
     output1 = genWave1
