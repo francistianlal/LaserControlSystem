@@ -9,7 +9,8 @@ function used:
 1. triangular waveform generator
 2. triangular waveform function
 3. triangular waveform normalizer for noisy signal
-4. triangular waveform tranformer for normalize and un-normalize the noisy signal
+4. triangular waveform transformer for normalize and un-normalize the noisy signal
+5. frequency shifter for triangular wave
 4. bit controller
 
 @author: Francis Tian
@@ -115,6 +116,20 @@ def error_calculator(current_waveform, regulated_time, reference_waveform):
     # waveform error is an array with the same length as the current waveform, which will be fed to the output DAC
     return waveform_error_storage
 
+# waveform frequency shifter
+def change_frequency(waveform, original_frequency, target_frequency):
+    original_period = 1 / original_frequency
+    target_period = 1 / target_frequency
+
+    original_samples = len(waveform)
+    target_samples = original_samples
+
+    original_time = np.arange(original_samples) * original_period
+    target_time = np.linspace(0, target_period * target_samples, target_samples, endpoint=False)
+
+    resampled_waveform = np.interp(target_time, original_time, waveform)
+
+    return resampled_waveform, target_frequency
 
 # a PIDController model
 class PIDController:
@@ -350,9 +365,11 @@ for i in range(N_loop):
         # Apply control signal to triangular wave VCO
         # triangular
         frequency = control_signal * K_VCO  # Frequency of the triangular waveform in Hz
-        # Generate the triangular waveform
-        t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
-        genWave1 = triangular_waveform * DAC_scale
+        # if control loop 3 is on, update the frequency only, otherwise update the waveform
+        if not loop_3_switch:
+            # Generate the triangular waveform
+            t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
+            genWave1 = triangular_waveform * DAC_scale
 
     # control loop 3 Active frequency linearization
     if loop_3_switch:
@@ -387,15 +404,34 @@ for i in range(N_loop):
         pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
         # Setpoint and initial feedback value
         setpoints = np.zeros(int(len(waveform_error_original)))  # V
+
         # Simulation time parameters
         dt = frameTime  # Time step
         # Calculate the control signal
-        # the feedback signal is the average of min and max of the waveform
+        # the feedback signal is a waveform with the same length of input
         feedbacks = waveform_error_original
         control_signal = pid.calculate(setpoints, feedbacks, dt)
 
         # generates the output signal
+        if previous_genWave1 in globals():
+            # updating the output waveform
+            current_genWave1 = previous_genWave1 - control_signal
+            # this is to implement the OPLL, change the frequency of the output sigal together with the waveform
+            frequency_shifted_waveform = change_frequency(current_genWave1, previous_frequency, frequency):
+            current_genWave1 = frequency_shifted_waveform
+            # store the changes
+            previous_genWave1 = current_genWave1
+            previous_frequency = frequency
 
+        else:
+            # Generate the triangular waveform
+            t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
+            current_genWave1 = triangular_waveform
+            # store the changes
+            previous_genWave1 = current_genWave1
+            previous_frequency = frequency
+
+        genWave1 = current_genWave1 * DAC_scale
 
     #### ADC/DAC data feeding for next round of control signal generation
     output1 = genWave1
