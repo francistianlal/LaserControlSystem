@@ -279,12 +279,12 @@ for i in range(N_loop):
     if loop_1_switch:
         # parameter setting
         # Loop filter (PID controller)
-        Kp = 0.1  # Proportional gain
-        Ki = 0.01  # Integral gain
-        Kd = 0.001  # Derivative gain
+        Kp = 0.4  # Proportional gain
+        Ki = 0.05  # Integral gain
+        Kd = 0.1  # Derivative gain
         pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
         # Setpoint and initial feedback value
-        setpoint = 0.0 # V
+        setpoint = 1 # V
         # Simulation time parameters
         dt = frameTime  # Time step
         # Calculate the control signal
