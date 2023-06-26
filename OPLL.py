@@ -57,7 +57,6 @@ def regulate_triangular_wave(time, waveform, initial_guess=[1, 1, 1, 1]):
     regulated_waveform = (waveform - amplitude_bias_fit) / (amplitude_fit * 0.5)
     regulated_time = time / period_fit
     return regulated_time, regulated_waveform, params
-
 def waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = None):
     # when we are transforming the waveform back to the normal scale for ADC
     # we have to know the para used in normalization and curve fitting
@@ -205,11 +204,12 @@ reference_waveform = []
 frameTime = 0.1e-3    # Acquisition time in seconds
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
+kClockDecimate = 2
 rpClockT = 8e-9
 
 ### Configure Generator, decimation
-step0 = 1/4.0
-step1 = 1/4.0
+step0 = 1/kClockDecimate
+step1 = 1/kClockDecimate
 amp_max = 1
 
 nBits = 14
@@ -217,6 +217,7 @@ maxVal = 2**(nBits-1) - 1
 NSamples = int(frameTime / (rpClockT/ step0))
 tAxis = np.arange(NSamples) * (rpClockT/ step0)
 DAC_scale = maxVal / amp_max
+
 # waveform selection
 # sin
 f_sin = 1000e3 # Hz
@@ -227,14 +228,14 @@ genWave0 = amplitude * np.sin(2 * np.pi * f_sin * tAxis) * DAC_scale
 duration = frameTime  # Duration of the waveform in seconds
 sampling_freq = step0/rpClockT  # Sampling frequency in Hz
 frequency = 10e3 # Frequency of the triangular waveform in Hz
-amplitude = 0.1  # Amplitude of the triangular waveform
+amplitude = 0.001  # Amplitude of the triangular waveform
 # Generate the triangular waveform
 t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
 genWave1 = triangular_waveform * DAC_scale
 
 # DC
-amplitude = 0.05
-genWave2 = amplitude * np.ones(len(tAxis)) * DAC_scale
+DC_amplitude = 0.037
+genWave2 = DC_amplitude * np.ones(len(tAxis)) * DAC_scale
 
 #plt.figure(1)
 #plt.plot(genWave0)
@@ -246,9 +247,8 @@ oscWrapper.updateGeneratorWaveform(rWaveA = output1, stepA=step0, rWaveB = outpu
 oscWrapper.setSignals(fLine=1 / lineTime, laserStatus=False, fanStatus=forceFan, TCamPulse=intTime, TSyncPulse=intTime)
 
 ### Configure ADCs
-kClockDecimate = 4
 oscWrapper.setDecimate(kClockDecimate)
-oscWrapper.setNSamples(int(frameTime / 8e-9 / kClockDecimate))
+oscWrapper.setNSamples(int(frameTime / (rpClockT * kClockDecimate)))
 
 ### Start ADCs Acquisition
 oscWrapper.startContinuousACQ(startTriggers=False)
@@ -256,7 +256,7 @@ oscWrapper.setOutputFrameTrigger(count=None)
 print('[RP] Starting to send output frame triggers!!')
 
 ### Get Data
-bDataB, bDataC, repLen, triggerTS, triggerIndex, wrapped = oscWrapper.getData(timeout=2.0)
+bDataB, bDataC, repLen, triggerTS, triggerIndex, wrapped = oscWrapper.getData(timeout=2)
 dataB, dataC, smuggledBits = extractSmuggledBits(bDataB, bDataC)
 
 ADCBits = 14
@@ -266,8 +266,10 @@ ADCScale = ADCRange / 2**(ADCBits-1)
 input1 = dataB * ADCScale # Control loop
 input2 = dataC * ADCScale # Linewidth measurement
 
+plt.plot(tAxis, input1)
+plt.plot(t, triangular_waveform*1e3)
 #### here set the ADC/DAC to run continuously for 60 second
-N_loop = int(60 / frameTime)
+N_loop = int(30 / frameTime)
 loop_1_switch = True
 loop_2_switch = False
 loop_3_switch = False
@@ -279,23 +281,35 @@ for i in range(N_loop):
     if loop_1_switch:
         # parameter setting
         # Loop filter (PID controller)
-        Kp = 0.4  # Proportional gain
-        Ki = 0.05  # Integral gain
-        Kd = 0.1  # Derivative gain
+        Kp = 1e-11  # Proportional gain
+        Ki = 0  # Integral gain
+        Kd = 1e-7  # Derivative gain
         pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
         # Setpoint and initial feedback value
-        setpoint = 1 # V
+        setpoint = 0 # V
         # Simulation time parameters
         dt = frameTime  # Time step
         # Calculate the control signal
         # the feedback signal is the average of min and max of the waveform
         feedback = np.mean([max(input1), min(input1)])
+#        if 1:
+#            plt.plot(tAxis, input1)
+#            regulated_time, regulated_waveform, params = regulate_triangular_wave(tAxis, input1,
+ #                                                                                 initial_guess=[1, 1, 1, 1])
+
+#            break
+
+        print('max = ' + str(max(input1)) + ', min = ' + str(min(input1)))
         control_signal = pid.calculate(setpoint, feedback, dt)
-        print('here is the first control loop, error signal = ' + str(feedback) + ', control_signal = ' + str(control_signal))
         # apply the control signal to the output
         # DC
-        amplitude = amplitude + control_signal
-        genWave2 = amplitude * np.ones(len(tAxis)) * DAC_scale
+        DC_amplitude = DC_amplitude - control_signal
+        print('here is the first control loop, error signal = ' + str(feedback) + ', DC_amplitude = ' + str(DC_amplitude))
+
+
+        genWave2 = DC_amplitude * np.ones(len(tAxis)) * DAC_scale
+        if DC_amplitude < 0.04 or DC_amplitude > 0.06:
+            break
 
     ## control loop 2, OPLL
     if loop_2_switch:
@@ -417,7 +431,7 @@ for i in range(N_loop):
             # updating the output waveform
             current_genWave1 = previous_genWave1 - control_signal
             # this is to implement the OPLL, change the frequency of the output sigal together with the waveform
-            frequency_shifted_waveform = change_frequency(current_genWave1, previous_frequency, frequency):
+            frequency_shifted_waveform = change_frequency(current_genWave1, previous_frequency, frequency)
             current_genWave1 = frequency_shifted_waveform
             # store the changes
             previous_genWave1 = current_genWave1
@@ -439,7 +453,7 @@ for i in range(N_loop):
     ### DAC waveform generation and ADC waveform extraction
     oscWrapper.updateGeneratorWaveform(rWaveA = output1, stepA=step0, rWaveB = output2, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
     oscWrapper.setSignals(fLine=1 / lineTime, laserStatus=False, fanStatus=forceFan, TCamPulse=intTime, TSyncPulse=intTime)
-    oscWrapper.startContinuousACQ(startTriggers=False)
+
     bDataB, bDataC, repLen, triggerTS, triggerIndex, wrapped = oscWrapper.getData(timeout=2.0)
     dataB, dataC, smuggledBits = extractSmuggledBits(bDataB, bDataC)
     input1 = dataB * ADCScale # Control loop
