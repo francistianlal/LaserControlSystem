@@ -204,7 +204,7 @@ reference_waveform = []
 frameTime = 0.1e-3    # Acquisition time in seconds
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
-kClockDecimate = 2
+kClockDecimate = 4
 rpClockT = 8e-9
 
 ### Configure Generator, decimation
@@ -227,14 +227,14 @@ genWave0 = amplitude * np.sin(2 * np.pi * f_sin * tAxis) * DAC_scale
 # triangular
 duration = frameTime  # Duration of the waveform in seconds
 sampling_freq = step0/rpClockT  # Sampling frequency in Hz
-frequency = 10e3 # Frequency of the triangular waveform in Hz
-amplitude = 0.001  # Amplitude of the triangular waveform
+frequency = 20e3 # Frequency of the triangular waveform in Hz
+amplitude = 0.0003  # Amplitude of the triangular waveform
 # Generate the triangular waveform
 t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
 genWave1 = triangular_waveform * DAC_scale
 
 # DC
-DC_amplitude = 0.037
+DC_amplitude = 0.041
 genWave2 = DC_amplitude * np.ones(len(tAxis)) * DAC_scale
 
 #plt.figure(1)
