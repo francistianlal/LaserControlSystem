@@ -14,6 +14,7 @@ function used:
 6. bit controller
 7. live plotter
 8. autocorreclation function to calculate the shift needed for maximum pattern overlap
+9. check if a variable is in global
 @author: Francis Tian
 """
 
@@ -92,8 +93,6 @@ def regulate_triangular_wave(time, waveform, initial_guess):
     # signal regulation
     regulated_waveform = (waveform - amplitude_bias_fit) / (amplitude_fit * 0.5)
     regulated_time = time / initial_guess[1]
-    print(initial_guess)
-    print(regulated_time)
 
     return regulated_time, regulated_waveform, params
 
@@ -152,9 +151,7 @@ def error_calculator(current_waveform, regulated_time, reference_waveform):
     num_samples = len(extended_ramp_signal_matched)
     end = start_point + (num_steps * num_samples)
     extended_reference_time = np.linspace(start_point, end, num_samples)
-
-    shift_time = regulated_time[sample_shift]
-    print(shift_time)
+    shift_time = extended_reference_time[sample_shift]
     extended_reference_time = extended_reference_time - shift_time
 
     # now we calculate the error by calculating the difference between reference and current waveform
@@ -166,10 +163,7 @@ def error_calculator(current_waveform, regulated_time, reference_waveform):
         # calculate the error
         waveform_error_unit = value - extended_ramp_signal_matched[i_t_ref]
         waveform_error_storage.append(waveform_error_unit)
-    plt.plot(regulated_time, current_waveform)
-    plt.plot(extended_reference_time, extended_ramp_signal_matched)
-    plt.plot(regulated_time, waveform_error_storage)
-    plt.show()
+
     # waveform error is an array with the same length as the current waveform, which will be fed to the output DAC
     return np.array(waveform_error_storage)
 
@@ -216,6 +210,11 @@ class PIDController:
 
         return control_signal
 
+def check_global_variable(variable_name):
+    if variable_name in globals():
+        return True
+    else:
+        return False
 
 def extractSmuggledBits(bDataB, bDataC):
     def sign_extend(value, bits):
@@ -323,14 +322,13 @@ ADCScale = ADCRange / 2**(ADCBits-1)
 input1 = dataB * ADCScale # Control loop
 input2 = dataC * ADCScale # Linewidth measurement
 
-plt.plot(input1)
-plt.show()
-plt.plot(t, triangular_waveform*1e3)
+#plt.plot(input1)
+#plt.plot(t, triangular_waveform*1e3)
 #### here set the ADC/DAC to run continuously for 60 second
 N_loop = int(30 / frameTime)
 loop_1_switch = True
 loop_2_switch = False
-loop_3_switch = False
+loop_3_switch = True
 
 # live plot to show the signal generator and oscilloscope
 plt.style.use('fivethirtyeight')
@@ -382,11 +380,11 @@ for i in range(N_loop):
         # the feedback signal is the average of min and max of the waveform
         feedback = np.mean([max(input1), min(input1)])
         # min = -3.75, max = 3.05
-        print('max = ' + str(max(input1)) + ', min = ' + str(min(input1)))
-        control_signal = pid.calculate(setpoint, feedback, dt)
+        # print('max = ' + str(max(input1)) + ', min = ' + str(min(input1)))
+        dc_control_signal = pid.calculate(setpoint, feedback, dt)
         # apply the control signal to the output
         # DC
-        DC_amplitude = DC_amplitude - control_signal
+        DC_amplitude = DC_amplitude - dc_control_signal
         print('here is the first control loop, error signal = ' + str(feedback) + ', DC_amplitude = ' + str(DC_amplitude))
 
         # Generate the triangular waveform
@@ -471,10 +469,8 @@ for i in range(N_loop):
             genWave1 = triangular_waveform * DAC_scale
 
     # control loop 3 Active frequency linearization
-    if loop_3_switch:
-        # wait for x second before turning on the loop 3
-        if current_time < 5:
-            continue
+    # wait for x second before turning on the loop 3
+    if loop_3_switch and current_time > 3:
         # calculate the error signal, the waveform here is the beat signal from MZI
         time_tbd = tAxis
         waveform_tbd = input1
@@ -490,15 +486,16 @@ for i in range(N_loop):
         para = [input_amplitude, input_period, input_phase, input_amplitude_bias] # amplitude, period, phase, amplitude_bias
         # regulate the waveform from ADC
         current_waveform, regulated_time, para = waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = para)
-        if previous_waveform in globals():
+        if check_global_variable('previous_waveform'):
             # calculate the waveform error for updating the output AC
+
             waveform_error = error_calculator(current_waveform, regulated_time, reference_waveform)
             # the waveform error will be reverse back to original
             waveform_error_original, time_original = waveform_transformer(waveform_error, regulated_time, reverse=True, para=para)
             # update the waveform
             previous_waveform = current_waveform
         else:
-            waveform_error_original = 0
+            waveform_error_original = np.zeros(int(len(current_waveform)))
             previous_waveform = current_waveform
 
         # parameter setting for PID
@@ -518,11 +515,11 @@ for i in range(N_loop):
         control_signal = pid.calculate(setpoints, feedbacks, dt)
 
         # generates the output signal
-        if previous_genWave1 in globals():
+        if check_global_variable('previous_genWave1'):
             # updating the output waveform
             current_genWave1 = previous_genWave1 - control_signal
             # this is to implement the OPLL, change the frequency of the output sigal together with the waveform
-            frequency_shifted_waveform = change_frequency(current_genWave1, previous_frequency, frequency)
+            frequency_shifted_waveform, target_frequency= change_frequency(current_genWave1, previous_frequency, frequency)
             current_genWave1 = frequency_shifted_waveform
             # store the changes
             previous_genWave1 = current_genWave1
@@ -535,8 +532,8 @@ for i in range(N_loop):
             previous_genWave1 = current_genWave1
             previous_frequency = frequency
 
-        genWave1 = current_genWave1 * DAC_scale
-
+        # implement the dc changes in the first loop
+        genWave1 = (current_genWave1 - dc_control_signal) * DAC_scale
     #### ADC/DAC data feeding for next round of control signal generation
     output1 = genWave1
     output2 = genWave2
