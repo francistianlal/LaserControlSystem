@@ -15,6 +15,7 @@ function used:
 7. live plotter
 8. autocorreclation function to calculate the shift needed for maximum pattern overlap
 9. check if a variable is in global
+10. rescale a wavefore to match the max and min of another
 @author: Francis Tian
 """
 
@@ -43,9 +44,9 @@ def generate_square_waveform(duration, sampling_freq, frequency, amplitude):
     t = np.linspace(0, duration, int(duration * sampling_freq), endpoint=False)
 
     # Generate triangular waveform
-    triangular_waveform = amplitude * signal.square(2 * np.pi * frequency * t, duty=0.5)
+    square_waveform = amplitude * signal.square(2 * np.pi * frequency * t, duty=0.5)
 
-    return t, triangular_waveform
+    return t, square_waveform
 
 
 def generate_ramp_waveform(duration, period, amplitude, sampling_frequency):
@@ -75,28 +76,39 @@ def generate_ramp_waveform(duration, period, amplitude, sampling_frequency):
 # FM laser signal across the MZI we used for FM linearity locking, both frequency and amplitude = 1, centered around 0
 # Define the triangular wave function
 def triangular_wave(t, amplitude, period, center, amplitude_bias):
-    return amplitude * (2 / period) * (period / 2 - np.abs((t - center) % period - period / 2)) - amplitude / 2 + amplitude_bias
+    return amplitude * signal.sawtooth(2 * np.pi / period * (t-center), width=0.5) + amplitude_bias
 
+    # return amplitude * (2 / period) * (period / 2 - np.abs((t - center) % period - period / 2)) - amplitude / 2 + amplitude_bias
 # use curve fitting principle to guess the paramter for this triangular wave
 # then perform the regulation
-def regulate_triangular_wave(time, waveform, initial_guess):
+def regulate_triangular_wave(t, waveform, initial_guess, waveform_type = 'triangular'):
     # Fit the noisy signal with the triangular wave function
-    params, params_covariance = curve_fit(triangular_wave, time, waveform, p0 = initial_guess)
+    if waveform_type == 'triangular':
+        # the curve fit doesn't do well with only one period
+        params, params_covariance = curve_fit(triangular_wave, t, waveform, p0 = initial_guess)
 
-    # Extract the fitted parameters
-    amplitude_fit, period_fit, phase_fit, amplitude_bias_fit = params
-    amplitude_fit = abs(amplitude_fit)
-    # # Generate the fitted triangular wave signal
-    # fitted_signal = triangular_wave(time, amplitude_fit, period_fit, phase_fit, amplitude_bias_fit)
-    # plt.plot(time, fitted_signal)
+        # Extract the fitted parameters
+        amplitude_fit, period_fit, phase_fit, amplitude_bias_fit = params
+        amplitude_fit = abs(amplitude_fit)
+        # # Generate the fitted triangular wave signal
+        # fitted_signal = triangular_wave(time, amplitude_fit, period_fit, phase_fit, amplitude_bias_fit)
+        # plt.plot(time, fitted_signal)
 
-    # signal regulation
-    regulated_waveform = (waveform - amplitude_bias_fit) / (amplitude_fit * 0.5)
-    regulated_time = time / initial_guess[1]
+        # signal regulation
+        regulated_waveform = (waveform - amplitude_bias_fit) / (amplitude_fit)
+        regulated_time = t / period_fit
+
+    else:
+        params = initial_guess
+        amplitude_fit, period_fit, phase_fit, amplitude_bias_fit = initial_guess
+        amplitude_fit = abs(amplitude_fit)
+        # signal regulation
+        regulated_waveform = (waveform - amplitude_bias_fit) / (amplitude_fit)
+        regulated_time = t / initial_guess[1]
 
     return regulated_time, regulated_waveform, params
 
-def waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = None):
+def waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = None, waveform_type = 'triangular'):
     # when we are transforming the waveform back to the normal scale for ADC
     # we have to know the para used in normalization and curve fitting
     try:
@@ -108,9 +120,9 @@ def waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = None):
         waveform_original = waveform_tbd * (amplitude_fit * 0.5) + amplitude_bias_fit
         time_original = time_tbd * period_fit
         # return the waveform to be used by ADC/DAC
-        return waveform_original, time_original
+        return waveform_original, time_original, para
     else:
-        regulated_time, regulated_waveform, params = regulate_triangular_wave(time_tbd, waveform_tbd, para)
+        regulated_time, regulated_waveform, params = regulate_triangular_wave(time_tbd, waveform_tbd, para, waveform_type)
         # return the normalized waveform
         return regulated_waveform, regulated_time, params
 
@@ -135,11 +147,11 @@ def error_calculator(current_waveform, regulated_time, reference_waveform):
     extended_ramp_signal = np.concatenate((reference_waveform, np.flip(reference_waveform)))
 
     # Repeat and trim the extended ramp signal to match the length of the triangular wave signal
-    repitition_number = max(regulated_time) + 1
-    extended_ramp_signal_matched = np.tile(extended_ramp_signal, int(repitition_number))
+    repetition_number = max(regulated_time) + 5
+    extended_ramp_signal_matched = np.tile(extended_ramp_signal, int(repetition_number))
     # find the first minima of the triangular wave signal in the time domain
     min_index = None
-    sample_shift = find_max_overlap(extended_ramp_signal_matched, current_waveform)
+    sample_shift = find_max_overlap(current_waveform, extended_ramp_signal_matched)
     #for i in range(1, len(current_waveform) - 1):
     #    if current_waveform[i] < current_waveform[i - 1] and current_waveform[i] < current_waveform[i + 1]:
     #        min_index = i
@@ -151,18 +163,38 @@ def error_calculator(current_waveform, regulated_time, reference_waveform):
     num_samples = len(extended_ramp_signal_matched)
     end = start_point + (num_steps * num_samples)
     extended_reference_time = np.linspace(start_point, end, num_samples)
-    shift_time = extended_reference_time[sample_shift]
-    extended_reference_time = extended_reference_time - shift_time
+    # sometime you have a phase shift of 180 degree, i used the minimum error method to decide which is the right one
+    shift_time_non_shift = (extended_reference_time[sample_shift]) / 2
+    shift_time_phase_shift = (extended_reference_time[sample_shift]) / 2 + 0.5
+    shift_time_candidate = [shift_time_non_shift, shift_time_phase_shift]
+    waveform_error_storage = {}
 
-    # now we calculate the error by calculating the difference between reference and current waveform
-    waveform_error_storage = []
-    for index, value in enumerate(current_waveform):
-        time = regulated_time[index]
-        # find the corresponding value in the extended ramp
-        i_t_ref = np.abs(extended_reference_time - time).argmin()
-        # calculate the error
-        waveform_error_unit = value - extended_ramp_signal_matched[i_t_ref]
-        waveform_error_storage.append(waveform_error_unit)
+    for shift_index, shift_candidate in enumerate(shift_time_candidate):
+        # test the candidate
+        shift_time = shift_candidate
+        # if the shift goes beyong the time scale, it means correlation has failed, bounce
+        extended_reference_time_shift = extended_reference_time - shift_time
+        waveform_error_storage[shift_index] = []
+        # now we calculate the error by calculating the difference between reference and current waveform
+        for index, value in enumerate(current_waveform):
+            time_match = regulated_time[index]
+            # find the corresponding value in the extended ramp
+            i_t_ref = np.abs(extended_reference_time_shift - time_match).argmin()
+            # calculate the error
+            waveform_error_unit = value - extended_ramp_signal_matched[i_t_ref]
+            waveform_error_storage[shift_index].append(waveform_error_unit)
+
+    # decide which one is better
+    if sum(abs(np.array(waveform_error_storage[0]))) < sum(abs(np.array(waveform_error_storage[1]))):
+        waveform_error_storage = waveform_error_storage[0]
+    else:
+        waveform_error_storage = waveform_error_storage[1]
+
+    #plt.figure()
+    #plt.plot(regulated_time,current_waveform)
+    #plt.plot(extended_reference_time_shift,extended_ramp_signal_matched)
+    #plt.plot(regulated_time,waveform_error_storage)
+    #np.sum(abs(np.array(waveform_error_storage)))
 
     # waveform error is an array with the same length as the current waveform, which will be fed to the output DAC
     return np.array(waveform_error_storage)
@@ -181,6 +213,22 @@ def change_frequency(waveform, original_frequency, target_frequency):
     resampled_waveform = np.interp(target_time, original_time, waveform)
 
     return resampled_waveform, target_frequency
+
+# this function reshape waveform 2 so that it has the same max and min as waveform 1
+def reshape_waveform(waveform1, waveform2):
+    # Find the maximum and minimum values of both waveforms
+    max_value1 = np.max(waveform1)
+    min_value1 = np.min(waveform1)
+    max_value2 = np.max(waveform2)
+    min_value2 = np.min(waveform2)
+
+    # Calculate scaling factors
+    amplitude_scaling_factor = (max_value1 - min_value1) / (max_value2 - min_value2)
+    offset_scaling_factor = np.mean(waveform1) - amplitude_scaling_factor * np.mean(waveform2)
+
+    # Apply scaling and offset to waveform 2
+    scaled_waveform2 = amplitude_scaling_factor * waveform2 + offset_scaling_factor
+    return scaled_waveform2
 
 # a PIDController model
 class PIDController:
@@ -260,6 +308,7 @@ reference_waveform = []
 _, reference_waveform = generate_ramp_waveform(0.5, 0.5, 2, 1e3)
 reference_waveform = reference_waveform - 1
 # plt.plot(reference_waveform)
+
 # set the ADC/DAC general code
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
@@ -282,21 +331,21 @@ DAC_scale = maxVal / amp_max
 # triangular
 duration = frameTime  # Duration of the waveform in seconds
 sampling_freq = fClock/kClockDecimate  # Sampling frequency in Hz
-frequency = 2**12 # Frequency of the triangular waveform in Hz
+frequency = 2**13 # Frequency of the triangular waveform in Hz
 amplitude = 0.005 # Amplitude of the triangular waveform
 DC_amplitude = 0
 # Generate the triangular waveform
 t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
-genWave1 = (triangular_waveform + DC_amplitude)* DAC_scale
+genWave1 = (triangular_waveform + DC_amplitude)
 
 # DC
 output2_amplitude = 0
-genWave2 = output2_amplitude * np.ones(len(tAxis)) * DAC_scale
+genWave2 = output2_amplitude * np.ones(len(tAxis))
 
 #plt.figure(1)
 #plt.plot(genWave0)
-output1 = genWave1
-output2 = genWave2
+output1 = genWave1 * DAC_scale
+output2 = genWave2 * DAC_scale
 
 ### start DAC waveform generation
 oscWrapper.updateGeneratorWaveform(rWaveA = output1, stepA=step0, rWaveB = output2, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
@@ -322,13 +371,14 @@ ADCScale = ADCRange / 2**(ADCBits-1)
 input1 = dataB * ADCScale # Control loop
 input2 = dataC * ADCScale # Linewidth measurement
 
-#plt.plot(input1)
+# plt.plot(input1)
 #plt.plot(t, triangular_waveform*1e3)
 #### here set the ADC/DAC to run continuously for 60 second
 N_loop = int(30 / frameTime)
-loop_1_switch = True
+loop_1_switch = True # loop switch one has to be on always, to lock the biasing point
 loop_2_switch = False
 loop_3_switch = True
+loop_3_start_time = 3
 
 # live plot to show the signal generator and oscilloscope
 plt.style.use('fivethirtyeight')
@@ -383,13 +433,14 @@ for i in range(N_loop):
         # print('max = ' + str(max(input1)) + ', min = ' + str(min(input1)))
         dc_control_signal = pid.calculate(setpoint, feedback, dt)
         # apply the control signal to the output
-        # DC
+        # update the DC
         DC_amplitude = DC_amplitude - dc_control_signal
         print('here is the first control loop, error signal = ' + str(feedback) + ', DC_amplitude = ' + str(DC_amplitude))
 
-        # Generate the triangular waveform
-        t, triangular_waveform = generate_square_waveform(duration, sampling_freq, frequency, amplitude)
-        genWave1 = (triangular_waveform + DC_amplitude) * DAC_scale
+        if current_time <= 3:
+            # Generate the waveform
+            t, triangular_waveform = generate_square_waveform(duration, sampling_freq, frequency, amplitude)
+            genWave1 = (triangular_waveform + DC_amplitude)
 
         if DC_amplitude < -0.9 or DC_amplitude > 0.9:
             break
@@ -463,14 +514,14 @@ for i in range(N_loop):
         # triangular
         frequency = control_signal * K_VCO  # Frequency of the triangular waveform in Hz
         # if control loop 3 is on, update the frequency only, otherwise update the waveform
+
         if not loop_3_switch:
-            # Generate the triangular waveform
             t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
-            genWave1 = triangular_waveform * DAC_scale
+            genWave1 = triangular_waveform + DC_amplitude
 
     # control loop 3 Active frequency linearization
     # wait for x second before turning on the loop 3
-    if loop_3_switch and current_time > 3:
+    if loop_3_switch and current_time > loop_3_start_time:
         # calculate the error signal, the waveform here is the beat signal from MZI
         time_tbd = tAxis
         waveform_tbd = input1
@@ -485,13 +536,14 @@ for i in range(N_loop):
         input_amplitude_bias = np.mean([np.max(input1), np.min(input1)])
         para = [input_amplitude, input_period, input_phase, input_amplitude_bias] # amplitude, period, phase, amplitude_bias
         # regulate the waveform from ADC
-        current_waveform, regulated_time, para = waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = para)
+
+        current_waveform, regulated_time, params = waveform_transformer(waveform_tbd, time_tbd, reverse = False, para = para, waveform_type = 'square')
         if check_global_variable('previous_waveform'):
             # calculate the waveform error for updating the output AC
-
             waveform_error = error_calculator(current_waveform, regulated_time, reference_waveform)
+
             # the waveform error will be reverse back to original
-            waveform_error_original, time_original = waveform_transformer(waveform_error, regulated_time, reverse=True, para=para)
+            waveform_error_original, time_original, params = waveform_transformer(waveform_error, regulated_time, reverse=True, para=para, waveform_type = 'square')
             # update the waveform
             previous_waveform = current_waveform
         else:
@@ -516,10 +568,11 @@ for i in range(N_loop):
 
         # generates the output signal
         if check_global_variable('previous_genWave1'):
-            # updating the output waveform
+            # updating the output waveform, it should not change the absolute amplitude of the waveform
             current_genWave1 = previous_genWave1 - control_signal
+            current_genWave1 = reshape_waveform(previous_genWave1, current_genWave1)
             # this is to implement the OPLL, change the frequency of the output sigal together with the waveform
-            frequency_shifted_waveform, target_frequency= change_frequency(current_genWave1, previous_frequency, frequency)
+            frequency_shifted_waveform, target_frequency = change_frequency(current_genWave1, previous_frequency, frequency)
             current_genWave1 = frequency_shifted_waveform
             # store the changes
             previous_genWave1 = current_genWave1
@@ -527,16 +580,17 @@ for i in range(N_loop):
 
         else:
             # Use existing output waveform
-            current_genWave1 = genWave1 / DAC_scale
+            current_genWave1 = genWave1
             # store the changes
             previous_genWave1 = current_genWave1
             previous_frequency = frequency
 
         # implement the dc changes in the first loop
-        genWave1 = (current_genWave1 - dc_control_signal) * DAC_scale
+        genWave1 = (current_genWave1 - dc_control_signal)
+
     #### ADC/DAC data feeding for next round of control signal generation
-    output1 = genWave1
-    output2 = genWave2
+    output1 = genWave1 * DAC_scale
+    output2 = genWave2 * DAC_scale
     ### DAC waveform generation and ADC waveform extraction
     oscWrapper.updateGeneratorWaveform(rWaveA = output1, stepA=step0, rWaveB = output2, stepB=step1, syncChannels=True, VERBOSE=False, nbits=14)
     oscWrapper.setSignals(fLine=1 / lineTime, laserStatus=False, fanStatus=forceFan, TCamPulse=intTime, TSyncPulse=intTime)
@@ -545,11 +599,11 @@ for i in range(N_loop):
     dataB, dataC, smuggledBits = extractSmuggledBits(bDataB, bDataC)
     input1 = dataB * ADCScale # Control loop
     input2 = dataC * ADCScale # Linewidth measurement
-    # Generate new random data array
-    tAxis = np.arange(NSamples) * (rpClockT * 800/ step0)
+    # Generate new data array for displaying live plot
+    tAxis_enlarged = np.arange(NSamples) * (rpClockT * 800/ step0)
     # do an update of data for plotting
-    x = tAxis + current_time # the time
-    y1 = genWave1 / DAC_scale  # the input waveform
+    x = tAxis_enlarged + current_time # the time
+    y1 = genWave1  # the input waveform
     y2 = input1  # the output waveform
 
     # Append the data to the lists
@@ -565,19 +619,18 @@ for i in range(N_loop):
     ax1.set_xlim(np.min(live_plot_time), np.max(live_plot_time))
     ax1.set_ylim(np.min(live_plot_intensity1), np.max(live_plot_intensity1))
     ax2.set_ylim(np.min(live_plot_intensity2), np.max(live_plot_intensity2))
-    plt.title('discrete oscilloscope')
-
+    # plt.title('discrete oscilloscope')
     # Limit the size of the data lists
     if len(live_plot_time) > max_data_size:
         live_plot_time = live_plot_time[-max_data_size:]
         live_plot_intensity1 = live_plot_intensity1[-max_data_size:]
         live_plot_intensity2 = live_plot_intensity2[-max_data_size:]
     # Update the plot
-    animate(0)  # Update the plot with the new data
-    plt.pause(1e-9)  # Pause for 1 second
+    #animate(0)  # Update the plot with the new data
+    #plt.pause(1e-9)  # Pause for 1 nanosecond
 
 # Call the animation function repeatedly
-ani = FuncAnimation(fig, animate, interval = 100)  # Update every 1 second
+# ani = FuncAnimation(fig, animate, interval = 100)  # Update every 1 second
 
 ### Stop ADCs Acquisition
 oscWrapper.stopACQ()
