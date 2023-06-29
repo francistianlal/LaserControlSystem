@@ -312,7 +312,7 @@ reference_waveform = reference_waveform - 1
 # set the ADC/DAC general code
 lineTime = 25e-6  # For camera. Not used
 intTime = 21e-6  # For camera. Not used
-kClockDecimate = 8
+kClockDecimate = 16
 rpClockT = 8e-9
 fClock = int(125e6)
 
@@ -322,7 +322,7 @@ step1 = 1/kClockDecimate
 amp_max = 1
 nBits = 14
 maxVal = 2**(nBits-1) - 1
-NSamples = 2**12
+NSamples = 2**13
 frameTime = (NSamples * (rpClockT/ step0))   # Acquisition time in seconds
 tAxis = np.arange(NSamples) * (rpClockT/ step0)
 DAC_scale = maxVal / amp_max
@@ -331,11 +331,11 @@ DAC_scale = maxVal / amp_max
 # triangular
 duration = frameTime  # Duration of the waveform in seconds
 sampling_freq = fClock/kClockDecimate  # Sampling frequency in Hz
-frequency = 2**13 # Frequency of the triangular waveform in Hz
+waveform_frequency = 2**12 # Frequency of the triangular waveform in Hz
 amplitude = 0.005 # Amplitude of the triangular waveform
 DC_amplitude = 0
 # Generate the triangular waveform
-t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
+t, triangular_waveform = generate_square_waveform(duration, sampling_freq, waveform_frequency, amplitude)
 genWave1 = (triangular_waveform + DC_amplitude)
 
 # DC
@@ -371,14 +371,16 @@ ADCScale = ADCRange / 2**(ADCBits-1)
 input1 = dataB * ADCScale # Control loop
 input2 = dataC * ADCScale # Linewidth measurement
 
-# plt.plot(input1)
+plt.plot(input1)
+plt.show()
 #plt.plot(t, triangular_waveform*1e3)
 #### here set the ADC/DAC to run continuously for 60 second
-N_loop = int(30 / frameTime)
+N_loop = int(60 / frameTime)
 loop_1_switch = True # loop switch one has to be on always, to lock the biasing point
 loop_2_switch = False
 loop_3_switch = True
-loop_3_start_time = 3
+loop_2_start_time = 3
+loop_3_start_time = 5
 
 # live plot to show the signal generator and oscilloscope
 plt.style.use('fivethirtyeight')
@@ -386,7 +388,7 @@ fig, ax1 = plt.subplots()
 
 # Set the number of data points to display
 num_points = len(input1)
-time_frame_factor = 10
+time_frame_factor = 5
 max_data_size = num_points * time_frame_factor
 # Create empty lists to store the data
 live_plot_time = np.array([])
@@ -418,7 +420,7 @@ for i in range(N_loop):
     if loop_1_switch:
         # parameter setting
         # Loop filter (PID controller)
-        Kp = 1e-5  # Proportional gain
+        Kp = 5e-4  # Proportional gain
         Ki = 0  # Integral gain
         Kd = 1e-6  # Derivative gain
         pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
@@ -435,33 +437,31 @@ for i in range(N_loop):
         # apply the control signal to the output
         # update the DC
         DC_amplitude = DC_amplitude - dc_control_signal
-        print('here is the first control loop, error signal = ' + str(feedback) + ', DC_amplitude = ' + str(DC_amplitude))
 
-        if current_time <= 3:
-            # Generate the waveform
-            t, triangular_waveform = generate_square_waveform(duration, sampling_freq, frequency, amplitude)
-            genWave1 = (triangular_waveform + DC_amplitude)
+        # the first three second the first loop generator is always the only one working
+        # afterward if the loop2 and loop3 is not function its stay on to update the waveform
+        print('here is the first control loop, error signal = ' + str(feedback) + ', DC_control = ' + str(dc_control_signal))
 
         if DC_amplitude < -0.9 or DC_amplitude > 0.9:
             break
 
     ## control loop 2, OPLL
-    if loop_2_switch:
+    if loop_2_switch and current_time > loop_2_start_time:
         # parameter_setting
-        f_ref = 1e5
+        f_ref = waveform_frequency
         previous_phase = 0
         last_phase_error = 0
 
         duration = frameTime  # Duration of the signal in seconds
-        sample_rate = 1 / 8e-9 / kClockDecimate  # Number of samples per second
+        sample_rate = sampling_freq  # Number of samples per second
         # gain of PID controller
-        Kp = 0.1  # Proportional gain
-        Ki = 0.01  # Integral gain
-        Kd = 0.001  # Derivative gain
+        Kp = 1e-3  # Proportional gain
+        Ki = 1e-4  # Integral gain
+        Kd = 1e-5  # Derivative gain
 
-        cutoff_frequency = 100e3  # Cutoff frequency for the low-pass filter in Hz
+        cutoff_frequency = 10  # Cutoff frequency for the low-pass filter in Hz
 
-        K_LVCO = 1e6  # Hz/V
+        K_LVCO = 1e15  # Hz/V
         K_pitaya = 20  # 20mA/V
         K_laser = 200e6  # Hz/mA
         K_VCO = K_LVCO / K_pitaya / K_laser  # VCO gain Hz/V
@@ -481,7 +481,7 @@ for i in range(N_loop):
         Q_component = adc_input * lo_signal_sin
 
         # Apply a low-pass filter to the I and Q components
-        b, a = signal.butter(4, 2 * cutoff_frequency / sample_rate, 'low')
+        b, a = signal.butter(4, 2 * cutoff_frequency / sampling_freq, 'low')
         I_filtered = signal.lfilter(b, a, I_component)
         Q_filtered = signal.lfilter(b, a, Q_component)
 
@@ -492,9 +492,12 @@ for i in range(N_loop):
         # phase alway have to be zero
         phase_wrapped = np.mod(phase + np.pi, 2 * np.pi) - np.pi
         current_phase = phase_wrapped[-1]
-
+        #plt.plot(input1)
+        #plt.plot(I_filtered)
+        #plt.plot(Q_filtered)
+        #plt.plot(phase_wrapped)
         # calculate the phase difference and if no previous phase, skip
-        if previous_phase in globals():
+        if check_global_variable('previous_phase'):
             phase_change = current_phase - previous_phase
             # update the phase
             previous_phase = current_phase
@@ -512,12 +515,9 @@ for i in range(N_loop):
         control_signal = pid.calculate(setpoint, phase_change, dt)
         # Apply control signal to triangular wave VCO
         # triangular
-        frequency = control_signal * K_VCO  # Frequency of the triangular waveform in Hz
+        waveform_frequency = control_signal * K_VCO  # Frequency of the triangular waveform in Hz
         # if control loop 3 is on, update the frequency only, otherwise update the waveform
-
-        if not loop_3_switch:
-            t, triangular_waveform = generate_triangular_waveform(duration, sampling_freq, frequency, amplitude)
-            genWave1 = triangular_waveform + DC_amplitude
+        # print(waveform_frequency)
 
     # control loop 3 Active frequency linearization
     # wait for x second before turning on the loop 3
@@ -531,7 +531,7 @@ for i in range(N_loop):
         #plt.plot(time_tbd[1:N_sample_visual], waveform_tbd[1:N_sample_visual])
         ###
         input_amplitude = (np.max(input1) - np.min(input1))/2
-        input_period = 1/frequency
+        input_period = 1/waveform_frequency
         input_phase = 0
         input_amplitude_bias = np.mean([np.max(input1), np.min(input1)])
         para = [input_amplitude, input_period, input_phase, input_amplitude_bias] # amplitude, period, phase, amplitude_bias
@@ -552,9 +552,9 @@ for i in range(N_loop):
 
         # parameter setting for PID
         # Loop filter (PID controller)
-        Kp = 1e-5  # Proportional gain
+        Kp = 1e-4  # Proportional gain
         Ki = 0  # Integral gain
-        Kd = 1e-7  # Derivative gain
+        Kd = 1e-6  # Derivative gain
         pid = PIDController(kp = Kp, ki = Ki, kd = Kd)
         # Setpoint and initial feedback value
         setpoints = np.zeros(int(len(waveform_error_original)))  # V
@@ -564,29 +564,32 @@ for i in range(N_loop):
         # Calculate the control signal
         # the feedback signal is a waveform with the same length of input
         feedbacks = waveform_error_original
-        control_signal = pid.calculate(setpoints, feedbacks, dt)
+        waveform_control_signal = pid.calculate(setpoints, feedbacks, dt)
 
-        # generates the output signal
-        if check_global_variable('previous_genWave1'):
+    # generates the output signal
+    if check_global_variable('previous_genWave1'):
+        if check_global_variable('waveform_control_signal'):
             # updating the output waveform, it should not change the absolute amplitude of the waveform
-            current_genWave1 = previous_genWave1 - control_signal
+            current_genWave1 = previous_genWave1 - waveform_control_signal
             current_genWave1 = reshape_waveform(previous_genWave1, current_genWave1)
-            # this is to implement the OPLL, change the frequency of the output sigal together with the waveform
-            frequency_shifted_waveform, target_frequency = change_frequency(current_genWave1, previous_frequency, frequency)
-            current_genWave1 = frequency_shifted_waveform
-            # store the changes
-            previous_genWave1 = current_genWave1
-            previous_frequency = frequency
+        # this is to implement the biasing, change the frequency of the output sigal together with the waveform
+        current_genWave1 = current_genWave1 - dc_control_signal
+        # this is to implement the OPLL, change the frequency of the output sigal together with the waveform
+        frequency_shifted_waveform, target_frequency = change_frequency(current_genWave1, previous_waveform_frequency, waveform_frequency)
+        current_genWave1 = frequency_shifted_waveform
+        # store the changes
+        previous_genWave1 = current_genWave1
+        previous_waveform_frequency = waveform_frequency
 
-        else:
-            # Use existing output waveform
-            current_genWave1 = genWave1
-            # store the changes
-            previous_genWave1 = current_genWave1
-            previous_frequency = frequency
+    else:
+        # Use existing output waveform
+        current_genWave1 = genWave1
+        # store the changes
+        previous_genWave1 = current_genWave1
+        previous_waveform_frequency = waveform_frequency
 
-        # implement the dc changes in the first loop
-        genWave1 = (current_genWave1 - dc_control_signal)
+    # implement the dc changes in the first loop
+    genWave1 = current_genWave1
 
     #### ADC/DAC data feeding for next round of control signal generation
     output1 = genWave1 * DAC_scale
@@ -600,11 +603,11 @@ for i in range(N_loop):
     input1 = dataB * ADCScale # Control loop
     input2 = dataC * ADCScale # Linewidth measurement
     # Generate new data array for displaying live plot
-    tAxis_enlarged = np.arange(NSamples) * (rpClockT * 800/ step0)
+    tAxis_enlarged = np.arange(NSamples) * (rpClockT * 200/ step0)
     # do an update of data for plotting
     x = tAxis_enlarged + current_time # the time
-    y1 = genWave1  # the input waveform
-    y2 = input1  # the output waveform
+    y1 = genWave1  # the output waveform
+    y2 = input1  # the input waveform
 
     # Append the data to the lists
     live_plot_time = np.append(live_plot_time, x)
@@ -618,7 +621,7 @@ for i in range(N_loop):
     # Set the plot limits
     ax1.set_xlim(np.min(live_plot_time), np.max(live_plot_time))
     ax1.set_ylim(np.min(live_plot_intensity1), np.max(live_plot_intensity1))
-    ax2.set_ylim(np.min(live_plot_intensity2), np.max(live_plot_intensity2))
+    ax2.set_ylim(-4, 4)
     # plt.title('discrete oscilloscope')
     # Limit the size of the data lists
     if len(live_plot_time) > max_data_size:
@@ -626,8 +629,8 @@ for i in range(N_loop):
         live_plot_intensity1 = live_plot_intensity1[-max_data_size:]
         live_plot_intensity2 = live_plot_intensity2[-max_data_size:]
     # Update the plot
-    #animate(0)  # Update the plot with the new data
-    #plt.pause(1e-9)  # Pause for 1 nanosecond
+    animate(0)  # Update the plot with the new data
+    plt.pause(1e-9)  # Pause for 1 nanosecond
 
 # Call the animation function repeatedly
 # ani = FuncAnimation(fig, animate, interval = 100)  # Update every 1 second
